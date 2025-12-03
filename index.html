@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>即時通訊軟體</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Microsoft JhengHei', 'PingFang TC', sans-serif; }
+        body { max-width: 850px; margin: 20px auto; padding: 0 15px; background: #f5f7fa; }
+        .page { display: none; padding: 25px; background: white; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); margin-bottom: 20px; }
+        .page.active { display: block; }
+        h2 { color: #2d3748; margin-bottom: 22px; font-size: 1.4rem; border-bottom: 1px solid #eee; padding-bottom: 10px; }
+        
+        /* 輸入框與按鈕樣式 */
+        .input-group { display: flex; gap: 10px; margin-bottom: 18px; }
+        input { flex: 1; padding: 12px 15px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 1rem; }
+        input:focus { outline: none; border-color: #4299e1; box-shadow: 0 0 0 2px rgba(66,153,225,0.2); }
+        button { padding: 12px 24px; background: #4299e1; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 1rem; transition: background 0.3s; }
+        button:hover { background: #3182ce; }
+        
+        /* 錯誤提示 */
+        .error-msg { color: #e53e3e; font-size: 0.9rem; margin-top: -12px; margin-bottom: 15px; display: none; }
+        
+        /* 聊天室樣式 */
+        #chat-space { height: 450px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 15px; overflow-y: auto; margin-bottom: 18px; background: #f9fafb; }
+        #message-list { display: flex; flex-direction: column; gap: 12px; }
+        .message { padding: 12px 16px; border-radius: 10px; max-width: 75%; line-height: 1.5; position: relative; }
+        .others { background: white; border: 1px solid #e2e8f0; align-self: flex-start; }
+        .self { background: #4299e1; color: white; align-self: flex-end; }
+        .msg-header { font-size: 0.85rem; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
+        .others .msg-header .name { color: #4299e1; font-weight: 600; }
+        .self .msg-header .name { color: rgba(255,255,255,0.9); }
+        .msg-time { font-size: 0.75rem; opacity: 0.8; }
+        .msg-content { font-size: 0.95rem; word-break: break-all; }
+    </style>
+</head>
+<body>
+    <!-- 1. 密碼登入頁面 -->
+    <div id="login-page" class="page active">
+        <h2>通訊軟體 - 密碼驗證</h2>
+        <div class="input-group">
+            <input type="password" id="password-input" placeholder="請輸入密碼（230189487）" autocomplete="off">
+            <button onclick="checkPassword()">驗證登入</button>
+        </div>
+        <p id="password-error" class="error-msg">密碼錯誤，請重新輸入！</p>
+    </div>
+
+    <!-- 2. 使用者命名頁面 -->
+    <div id="name-page" class="page">
+        <h2>設定你的使用者名稱</h2>
+        <div class="input-group">
+            <input type="text" id="username-input" placeholder="請輸入你的名稱（不可空白）" autocomplete="off">
+            <button onclick="enterChat()">進入聊天室</button>
+        </div>
+    </div>
+
+    <!-- 3. 聊天室頁面 -->
+    <div id="chat-page" class="page">
+        <h2>即時聊天室</h2>
+        <div id="chat-space">
+            <div id="message-list"></div> <!-- 訊息列表 -->
+        </div>
+        <div class="input-group">
+            <input type="text" id="message-input" placeholder="輸入想發送的訊息..." autocomplete="off">
+            <button onclick="sendMessage()">發送</button>
+        </div>
+    </div>
+
+    <!-- 匯入 Firebase v8 SDK（穩定兼容） -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-analytics.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+
+    <script>
+        // 1. Firebase 初始化配置
+        const firebaseConfig = {
+            apiKey: "AIzaSyCikm3n5wtQiTMmVMWwyb-AeSfzsy9H1dI",
+            authDomain: "ng-chat-bb271.firebaseapp.com",
+            projectId: "ng-chat-bb271",
+            storageBucket: "ng-chat-bb271.firebasestorage.app",
+            messagingSenderId: "11581831126",
+            appId: "1:11581831126:web:3a0e438390144fb5675677",
+            measurementId: "G-JRQFBLDJT1"
+        };
+
+        const app = firebase.initializeApp(firebaseConfig);
+        const analytics = firebase.analytics(app);
+        const db = firebase.firestore(); // v8 正確初始化
+
+        // 全域變量（核心優化：解決監聽與時間同步問題）
+        let currentUsername = "";
+        let unsubscribeSnapshot = null; // 取消重複監聽
+        const loadedMessageIds = new Set(); // 訊息去重
+        let lastVisibleTimestamp = null; // 最後一條訊息的時間戳（用於監聽範圍控制）
+        const messageElements = new Map(); // 儲存訊息DOM（用於更新時間）
+
+        // 2. 密碼驗證邏輯
+        function checkPassword() {
+            const inputPwd = document.getElementById("password-input").value;
+            const errorMsg = document.getElementById("password-error");
+            
+            if (inputPwd === "230189487") {
+                document.getElementById("login-page").classList.remove("active");
+                document.getElementById("name-page").classList.add("active");
+                errorMsg.style.display = "none";
+            } else {
+                errorMsg.style.display = "block";
+            }
+        }
+
+        // 3. 進入聊天室（含資源清理）
+        function enterChat() {
+            const username = document.getElementById("username-input").value.trim();
+            if (!username) {
+                alert("請輸入有效的使用者名稱！");
+                return;
+            }
+
+            currentUsername = username;
+            // 切換頁面
+            document.getElementById("name-page").classList.remove("active");
+            document.getElementById("chat-page").classList.add("active");
+            
+            // 若之前有監聽，先取消（避免重複）
+            if (unsubscribeSnapshot) {
+                unsubscribeSnapshot();
+            }
+            
+            // 重置全域變量（避免多次進入時數據干擾）
+            loadedMessageIds.clear();
+            messageElements.clear();
+            lastVisibleTimestamp = null;
+            
+            // 加載歷史訊息並啟動即時監聽
+            loadHistoryMessages();
+        }
+
+        // 4. 加載歷史訊息（只取最新50條，優化效能）
+        function loadHistoryMessages() {
+            const messageList = document.getElementById("message-list");
+            messageList.innerHTML = ""; // 清空列表
+
+            db.collection("chat-messages")
+              .orderBy("timestamp", "desc") // 倒序取最新
+              .limit(50)
+              .get()
+              .then((querySnapshot) => {
+                  const messages = [];
+                  // 收集所有訊息，再反轉為正序
+                  querySnapshot.forEach((doc) => {
+                      messages.push({ id: doc.id, data: doc.data() });
+                  });
+                  messages.reverse().forEach((item) => {
+                      addMessageToUI(item.id, item.data());
+                  });
+                  // 歷史訊息加載後啟動即時監聽
+                  startRealTimeListen();
+                  // 滾動到最底部
+                  scrollToBottom();
+              })
+              .catch((error) => {
+                  console.error("加載歷史訊息失敗：", error);
+                  alert("歷史訊息加載失敗，請稍後再試");
+              });
+        }
+
+        // 5. 啟動即時監聽（精準範圍：只監聽新訊息）
+        function startRealTimeListen() {
+            let query = db.collection("chat-messages").orderBy("timestamp", "asc");
+            
+            // 只監聽「比最後一條歷史訊息更新」的內容，減少無用請求
+            if (lastVisibleTimestamp) {
+                query = query.where("timestamp", ">", lastVisibleTimestamp);
+            }
+
+            // 保存監聽函數，用於後續取消
+            unsubscribeSnapshot = query.onSnapshot(
+                (snapshot) => {
+                    snapshot.docChanges().forEach((change) => {
+                        const msgId = change.doc.id;
+                        const msgData = change.doc.data();
+
+                        // 處理新增訊息與時間戳更新（modified事件）
+                        if (change.type === "added") {
+                            addMessageToUI(msgId, msgData);
+                            scrollToBottom();
+                        } else if (change.type === "modified") {
+                            updateMessageTimeInUI(msgId, msgData);
+                        }
+                    });
+                },
+                (error) => {
+                    console.error("即時監聽錯誤：", error);
+                    alert("聊天室連接中斷，請重新進入");
+                }
+            );
+        }
+
+        // 6. 發送訊息（安全儲存時間戳）
+        function sendMessage() {
+            const msgInput = document.getElementById("message-input");
+            const content = msgInput.value.trim();
+            
+            if (!content) {
+                alert("請輸入訊息內容後再發送！");
+                return;
+            }
+
+            // 同時儲存本地時間（臨時顯示）與伺服器時間（最終排序）
+            const sendTime = new Date();
+            db.collection("chat-messages").add({
+                username: currentUsername,
+                content: content,
+                localTimestamp: sendTime.getTime(), // 本地時間（避免初始null）
+                timestamp: firebase.firestore.FieldValue.serverTimestamp() // 伺服器時間（全局統一）
+            })
+            .then(() => {
+                msgInput.value = ""; // 清空輸入框
+            })
+            .catch((error) => {
+                console.error("發送訊息失敗：", error);
+                alert("訊息發送失敗，請稍後再試");
+            });
+        }
+
+        // 7. 新增訊息到UI（核心修正：XSS防護 + 時間戳同步）
+        function addMessageToUI(msgId, msgData) {
+            // 去重：已加載的訊息跳過
+            if (loadedMessageIds.has(msgId)) return;
+            loadedMessageIds.add(msgId);
+
+            const messageList = document.getElementById("message-list");
+            const msgDiv = document.createElement("div");
+            const isSelf = msgData.username === currentUsername;
+
+            // 1. 建立使用者名稱節點（textContent防XSS）
+            const headerDiv = document.createElement("div");
+            headerDiv.className = "msg-header";
+
+            const nameSpan = document.createElement("span");
+            nameSpan.className = "name";
+            nameSpan.textContent = msgData.username || "未知使用者"; // 避免空值
+
+            // 2. 建立時間節點（處理時間戳 fallback）
+            const timeSpan = document.createElement("span");
+            timeSpan.className = "msg-time";
+            let timeStr = "未知時間";
+
+            if (msgData.timestamp && msgData.timestamp.toDate) {
+                // 優先用伺服器時間
+                timeStr = msgData.timestamp.toDate().toLocaleString("zh-Hant-TW", {
+                    year: "numeric", month: "2-digit", day: "2-digit",
+                    hour: "2-digit", minute: "2-digit", second: "2-digit",
+                    hour12: false // 24小時制
+                });
+                lastVisibleTimestamp = msgData.timestamp; // 更新最後時間戳
+            } else if (msgData.localTimestamp) {
+                // 次用本地時間（初始 fallback）
+                timeStr = new Date(msgData.localTimestamp).toLocaleString("zh-Hant-TW", {
+                    year: "numeric", month: "2-digit", day: "2-digit",
+                    hour: "2-digit", minute: "2-digit", second: "2-digit",
+                    hour12: false
+                });
+                // 轉換本地時間為Firebase Timestamp，用於監聽範圍
+                lastVisibleTimestamp = firebase.firestore.Timestamp.fromDate(new Date(msgData.localTimestamp));
+            }
+            timeSpan.textContent = timeStr;
+
+            // 3. 建立訊息內容節點（textContent防XSS）
+            const contentDiv = document.createElement("div");
+            contentDiv.className = "msg-content";
+            contentDiv.textContent = msgData.content || ""; // 避免空值
+
+            // 組裝DOM結構
+            headerDiv.appendChild(nameSpan);
+            headerDiv.appendChild(timeSpan);
+            msgDiv.className = `message ${isSelf ? "self" : "others"}`;
+            msgDiv.setAttribute("data-msgid", msgId); // 標記訊息ID
+            msgDiv.appendChild(headerDiv);
+            msgDiv.appendChild(contentDiv);
+
+            // 加入列表並儲存DOM引用
+            messageList.appendChild(msgDiv);
+            messageElements.set(msgId, msgDiv);
+        }
+
+        // 8. 更新訊息時間（處理modified事件：伺服器時間回填後更新UI）
+        function updateMessageTimeInUI(msgId, msgData) {
+            // 透過messageElements快速找到對應DOM
+            const msgDiv = messageElements.get(msgId);
+            if (!msgDiv) return;
+
+            const timeSpan = msgDiv.querySelector(".msg-time");
+            if (!timeSpan || !msgData.timestamp || !msgData.timestamp.toDate) return;
+
+            // 更新為伺服器時間
+            const timeStr = msgData.timestamp.toDate().toLocaleString("zh-Hant-TW", {
+                year: "numeric", month: "2-digit", day: "2-digit",
+                hour: "2-digit", minute: "2-digit", second: "2-digit",
+                hour12: false
+            });
+            timeSpan.textContent = timeStr;
+            // 更新最後時間戳
+            lastVisibleTimestamp = msgData.timestamp;
+        }
+
+        // 9. 工具函數：平滑滾動到聊天室底部
+        function scrollToBottom() {
+            const chatSpace = document.getElementById("chat-space");
+            // 用requestAnimationFrame確保DOM更新後再滾動
+            requestAnimationFrame(() => {
+                chatSpace.scrollTop = chatSpace.scrollHeight;
+            });
+        }
+
+        // 10. Enter鍵快捷操作（修正：用keydown替代keypress，兼容新版瀏覽器）
+        document.getElementById("password-input").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") checkPassword();
+        });
+        document.getElementById("username-input").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") enterChat();
+        });
+        document.getElementById("message-input").addEventListener("keydown", (e) => {
+            if (e.key === "Enter") sendMessage();
+        });
+
+        // 11. 頁面關閉時釋放資源（避免無效監聽）
+        window.addEventListener("beforeunload", () => {
+            if (unsubscribeSnapshot) {
+                unsubscribeSnapshot();
+            }
+        });
+    </script>
+</body>
+</html>
